@@ -1,14 +1,12 @@
 use anyhow::Result;
+use regex::Regex;
 
 use std::fs::File;
 
 use bson::{doc, Document};
 use serde::Deserialize;
 
-use crate::{
-    crud_v2::TestData,
-    unified::{ClientEntity, CollectionEntity, CreateEntity, DatabaseEntity, InitialData},
-};
+use crate::{crud_v2::TestData, unified::{ClientEntity, CollectionEntity, CreateEntity, DatabaseEntity, ExpectEvent, InitialData, Test}};
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
@@ -120,10 +118,16 @@ mod unified {
     use serde::Serialize;
     use serde_yaml::Value;
 
-    use crate::crud_v2;
+    use crate::{
+        client_deref_placeholder, collection_deref_placeholder, crud_v2,
+        database_name_deref_placeholder, CLIENT_0_DEREF_PLACEHOLDER,
+        COLLECTION_0_DEREF_PLACEHOLDER, DATABASE_0_NAME_DEREF_PLACEHOLDER,
+        SETUP_CLIENT_DEREF_PLACEHOLDER,
+    };
 
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
+    #[serde_with::skip_serializing_none]
     pub struct TestFile {
         pub description: String,
         pub schema_version: String,
@@ -139,7 +143,6 @@ mod unified {
         pub collection_name: String,
         pub database_name: String,
         pub documents: Vec<Document>,
-        pub todo: String,
     }
 
     #[derive(Debug, Serialize)]
@@ -150,11 +153,12 @@ mod unified {
         Collection(CollectionEntity),
     }
 
+    #[serde_with::skip_serializing_none]
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct ClientEntity {
         pub id: String,
-        pub observe_events: Option<Vec<String>>,
+        pub observe_events: Option<Vec<ExpectEvent>>,
         pub uri_options: Option<Document>,
     }
 
@@ -184,15 +188,15 @@ mod unified {
         pub expect_events: Option<Vec<ExpectEvents>>,
     }
 
-    impl From<crud_v2::Test> for Test {
-        fn from(old: crud_v2::Test) -> Self {
+    impl Test {
+        pub(crate) fn from_crud_v2(old: crud_v2::Test, test_number: usize) -> Self {
             let mut operations = Vec::new();
             if let Some(fp) = old.fail_point {
                 operations.push(Operation {
                     name: "configureFailPoint".to_string(),
                     object: "testRunner".to_string(),
                     arguments: doc! {
-                        "client": "*client0",
+                        "client": SETUP_CLIENT_DEREF_PLACEHOLDER,
                         "failPoint": fp,
                     },
                     save_result_as_entity: None,
@@ -202,19 +206,19 @@ mod unified {
             }
 
             for old_op in old.operations {
-                operations.push(old_op.into());
+                operations.push(Operation::from_crud_v2(old_op, test_number));
             }
 
             let expect_events = old.expectations.map(|old_events| {
                 vec![ExpectEvents {
-                    client: "*client0".to_string(),
+                    client: client_deref_placeholder(test_number),
                     event_type: "command".to_string(),
                     events: old_events
                         .into_iter()
                         .map(|event| ExpectEvent::CommandStartedEvent {
                             command: event.command,
                             command_name: event.command_name,
-                            database_name: Some("*database0Name".to_string()),
+                            database_name: Some(database_name_deref_placeholder(test_number)),
                         })
                         .collect(),
                 }]
@@ -262,8 +266,8 @@ mod unified {
         expect_error: Option<ExpectError>,
     }
 
-    impl From<crud_v2::Operation> for Operation {
-        fn from(old_op: crud_v2::Operation) -> Self {
+    impl Operation {
+        pub(crate) fn from_crud_v2(old_op: crud_v2::Operation, test_number: usize) -> Self {
             let arguments = match old_op.name.as_str() {
                 "waitForEvent" | "assertEventCount" => {
                     let event = match old_op.arguments.get_str("event").unwrap() {
@@ -275,23 +279,23 @@ mod unified {
                         "PoolClearedEvent" => doc! {
                             "poolClearedEvent": { }
                         },
-                        e => panic!("unrecognized event: {}", e)
+                        e => panic!("unrecognized event: {}", e),
                     };
 
                     doc! {
-                        "client": "*client0",
+                        "client": client_deref_placeholder(test_number),
                         "event": event,
                         "count": old_op.arguments.get("count").unwrap()
                     }
-                },
-                
+                }
+
                 _ => old_op.arguments,
             };
 
             Self {
                 name: old_op.name,
                 object: match old_op.object.as_str() {
-                    "collection" => "*collection0".to_string(),
+                    "collection" => collection_deref_placeholder(test_number),
                     _ => old_op.object,
                 },
                 arguments,
@@ -331,56 +335,167 @@ mod unified {
     }
 }
 
-fn convert(file_name: impl AsRef<str>, old: crud_v2::TestFile) -> unified::TestFile {
-    let create_entities = Some(vec![
-        CreateEntity::Client(ClientEntity {
-            id: "&client0 client0".to_string(),
-            observe_events: Some(vec!["TODO".to_string()]),
-            uri_options: old.tests[0].client_uri.clone(),
-        }),
-        CreateEntity::Database(DatabaseEntity {
-            id: "&database0 database0".to_string(),
-            client: "*client0".to_string(),
-            database_name: "&database0Name sdam-tests".to_string(),
-        }),
-        CreateEntity::Collection(CollectionEntity {
-            id: "&collection0 collection0".to_string(),
-            database: "*database0".to_string(),
-            collection_name: format!("&collection0Name {}", file_name.as_ref()),
-        }),
-    ]);
+static CLIENT_0_PLACEHOLDER: &'static str = "$CLIENT_0$";
+static CLIENT_0_DEREF_PLACEHOLDER: &'static str = "$CLIENT_0_DEREF_PLACEHOLDER$";
+static DATABASE_0_PLACEHOLDER: &'static str = "$DATABASE_0$";
+static DATABASE_0_NAME_PLACEHOLDER: &'static str = "$DATABASE_0_NAME$";
+static DATABASE_0_DEREF_PLACEHOLDER: &'static str = "$DATABASE_0_DEREF$";
+static DATABASE_0_NAME_DEREF_PLACEHOLDER: &'static str = "$DATABASE_0_NAME_DEREF_PLACEHOLDER$";
+static COLLECTION_0_PLACEHOLDER: &'static str = "$COLLECTION_0$";
+static COLLECTION_0_NAME_PLACEHOLDER: &'static str = "$COLLECTION_0_NAME_DEFINITION$";
+static COLLECTION_0_NAME_DEREF_PLACEHOLDER: &'static str = "$COLLECTION_0_NAME_DEREF_PLACEHOLDER$";
+static COLLECTION_0_DEREF_PLACEHOLDER: &'static str = "$COLLECTION_0_DEREF_PLACEHOLDER$";
+static SETUP_CLIENT_DEFINITION_PLACEHOLDER: &'static str = "$SETUP_CLIENT_DEFINITION_PLACEHOLDER$";
+static SETUP_CLIENT_DEREF_PLACEHOLDER: &'static str = "$SETUP_CLIENT_DEREF_PLACEHOLDER$";
+
+static PLACEHOLDER_REPLACEMENTS: &'static [(&'static str, &'static str)] = &[
+    (CLIENT_0_PLACEHOLDER, "&client0 client0"),
+    (CLIENT_0_DEREF_PLACEHOLDER, "*client0"),
+    (DATABASE_0_PLACEHOLDER, "&database0 database0"),
+    (DATABASE_0_DEREF_PLACEHOLDER, "*database0"),
+    (DATABASE_0_NAME_PLACEHOLDER, "&database0 sdam-tests"),
+    (DATABASE_0_NAME_DEREF_PLACEHOLDER, "*database0"),
+    (COLLECTION_0_PLACEHOLDER, "&collection0 collection0"),
+    (COLLECTION_0_DEREF_PLACEHOLDER, "*collection0"),
+    (COLLECTION_0_NAME_DEREF_PLACEHOLDER, "*collection0Name"),
+    ("initialData:", "initialData: &initialData"),
+];
+
+static REGEX_PLACEHOLDER_REPLACEMENTS: &'static [(&'static str, &'static str)] = &[
+    (
+        "\\$CLIENT_(\\d+)_DEFINITION_PLACEHOLDER\\$",
+        "&client$1 client$1",
+    ),
+    ("\\$CLIENT_(\\d+)_DEREF_PLACEHOLDER\\$", "*client$1"),
+    (
+        "\\$DATABASE_(\\d+)_DEFINITION_PLACEHOLDER\\$",
+        "&database$1 database$1",
+    ),
+    ("\\$DATABASE_(\\d+)_DEREF_PLACEHOLDER\\$", "*database$1"),
+    (
+        "\\$DATABASE_(\\d+)_NAME_DEFINITION_PLACEHOLDER\\$",
+        "&database${1}Name sdam-tests",
+    ),
+    (
+        "\\$DATABASE_(\\d+)_NAME_DEREF_PLACEHOLDER\\$",
+        "*database${1}Name",
+    ),
+    (
+        "\\$COLLECTION_(\\d+)_DEFINITION_PLACEHOLDER\\$",
+        "&collection$1 collection$1",
+    ),
+    ("\\$COLLECTION_(\\d+)_DEREF_PLACEHOLDER\\$", "*collection$1"),
+    (
+        "\\$COLLECTION_(\\d+)_NAME_DEREF_PLACEHOLDER\\$",
+        "*collection${1}Name",
+    ),
+    ("initialData:", "initialData: &initialData"),
+    (
+        "\\$SETUP_CLIENT_DEFINITION_PLACEHOLDER\\$",
+        "&setupClient setupClient",
+    ),
+    ("\\$SETUP_CLIENT_DEREF_PLACEHOLDER\\$", "*setupClient"),
+];
+
+fn client_deref_placeholder(i: usize) -> String {
+    format!("$CLIENT_{}_DEREF_PLACEHOLDER$", i)
+}
+
+fn database_deref_placeholder(i: usize) -> String {
+    format!("$DATABASE_{}_DEREF_PLACEHOLDER$", i)
+}
+
+fn database_name_deref_placeholder(i: usize) -> String {
+    format!("$DATABASE_{}_NAME_DEREF_PLACEHOLDER$", i)
+}
+
+fn collection_deref_placeholder(i: usize) -> String {
+    format!("$COLLECTION_{}_DEREF_PLACEHOLDER$", i)
+}
+
+fn collection_name_deref_placeholder(i: usize) -> String {
+    format!("$COLLECTION_{}_NAME_DEREF_PLACEHOLDER$", i)
+}
+
+fn convert(file_name: impl AsRef<str>, old: crud_v2::TestFile) -> Result<String> {
+    let mut ents = Vec::new();
+    let mut tests = Vec::new();
+    for (i, old_test) in old.tests.into_iter().enumerate() {
+        ents.push(CreateEntity::Client(ClientEntity {
+            id: format!("$CLIENT_{}_DEFINITION_PLACEHOLDER$", i),
+            observe_events: Some(vec![ExpectEvent::CommandStartedEvent]),
+            uri_options: old_test.client_uri.clone(),
+        }));
+
+        ents.push(CreateEntity::Database(DatabaseEntity {
+            id: format!("$DATABASE_{}_DEFINITION_PLACEHOLDER$", i),
+            client: format!("$CLIENT_{}_DEREF_PLACEHOLDER$", i),
+            database_name: format!("$DATABASE_{}_NAME_DEFINITION_PLACEHOLDER$", i),
+        }));
+
+        ents.push(CreateEntity::Collection(CollectionEntity {
+            id: format!("$COLLECTION_{}_DEFINITION_PLACEHOLDER$", i),
+            database: format!("$DATABASE_{}_DEREF_PLACEHOLDER$", i),
+            collection_name: format!("$COLLECTION_{}_NAME_DEFINITION_PLACEHOLDER$", i),
+        }));
+
+        tests.push(Test::from_crud_v2(old_test, i))
+    }
+
+    // add setup client for configureFailPoint
+    ents.push(CreateEntity::Client(ClientEntity {
+        id: "$SETUP_CLIENT_DEFINITION_PLACEHOLDER$".to_string(),
+        observe_events: None,
+        uri_options: None,
+    }));
 
     let initial_data = match old.data {
         TestData::Single(docs) => {
             vec![InitialData {
-                collection_name: "*collection0Name".to_string(),
-                database_name: "*database0Name".to_string(),
+                collection_name: COLLECTION_0_NAME_DEREF_PLACEHOLDER.to_string(),
+                database_name: DATABASE_0_NAME_DEREF_PLACEHOLDER.to_string(),
                 documents: docs,
-                todo: "TODO: add &initialData".to_string(),
             }]
         }
         _ => panic!("got map of data"),
     };
 
-    unified::TestFile {
+    let test_file = unified::TestFile {
         description: file_name.as_ref().to_string(),
         schema_version: "1.9".to_string(),
         run_on_requirements: old
             .run_on
             .map(|run_on| run_on.into_iter().map(From::from).collect()),
-        create_entities,
+        create_entities: Some(ents),
         initial_data: Some(initial_data),
-        tests: old.tests.into_iter().map(From::from).collect(),
+        tests,
+    };
+
+    let mut raw_string = serde_yaml::to_string(&test_file)?;
+
+    for (regex_str, replacement) in REGEX_PLACEHOLDER_REPLACEMENTS {
+        let regex = Regex::new(regex_str).unwrap();
+        raw_string = regex.replace_all(&raw_string, *replacement).to_string();
     }
+
+    let regex = Regex::new("\\$COLLECTION_(\\d+)_NAME_DEFINITION_PLACEHOLDER\\$").unwrap();
+    raw_string = regex
+        .replace_all(
+            &raw_string,
+            format!("&collection{}Name {}", "${1}", file_name.as_ref()).as_str(),
+        )
+        .to_string();
+
+    Ok(raw_string)
 }
 
 fn main() -> Result<()> {
-    let file = File::open("/home/patrick/specifications/source/server-discovery-and-monitoring/tests/integration/auth-error.yml")?;
+    // let file = File::open("/home/patrick/specifications/source/server-discovery-and-monitoring/tests/integration/auth-error.yml")?;
+    let file = File::open("/home/patrick/specifications/source/server-discovery-and-monitoring/tests/integration/hello-timeout.yml")?;
 
     let old: crud_v2::TestFile = serde_yaml::from_reader(file)?;
-    let new = convert("auth-error", old);
-    let yaml = serde_yaml::to_string(&new)?;
-    println!("{}", yaml);
-    
+    let new = convert("auth-error", old)?;
+    println!("{}", new);
+
     Ok(())
 }

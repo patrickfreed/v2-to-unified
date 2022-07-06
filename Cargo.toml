@@ -13,3 +13,4 @@ serde_yaml = "0.8"
 clap = { version = "3.0.13", features = ["derive"] }
 bson = "2"
 anyhow = "1"
+regex = "1.6"
