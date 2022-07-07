@@ -6,7 +6,13 @@ use std::fs::File;
 use bson::{doc, Document};
 use serde::Deserialize;
 
-use crate::{crud_v2::TestData, unified::{ClientEntity, CollectionEntity, CreateEntity, DatabaseEntity, ExpectEvent, InitialData, Test}};
+use crate::{
+    crud_v2::TestData,
+    unified::{
+        ClientEntity, CollectionEntity, CreateEntity, DatabaseEntity, ExpectEvent, InitialData,
+        Test,
+    },
+};
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
@@ -91,7 +97,7 @@ mod crud_v2 {
     pub struct Operation {
         pub name: String,
         pub object: String,
-        pub arguments: Document,
+        pub arguments: Option<Document>,
         pub error: Option<bool>,
     }
 
@@ -158,7 +164,7 @@ mod unified {
     #[serde(rename_all = "camelCase")]
     pub struct ClientEntity {
         pub id: String,
-        pub observe_events: Option<Vec<ExpectEvent>>,
+        pub observe_events: Option<Vec<String>>,
         pub uri_options: Option<Document>,
     }
 
@@ -195,10 +201,10 @@ mod unified {
                 operations.push(Operation {
                     name: "configureFailPoint".to_string(),
                     object: "testRunner".to_string(),
-                    arguments: doc! {
+                    arguments: Some(doc! {
                         "client": SETUP_CLIENT_DEREF_PLACEHOLDER,
                         "failPoint": fp,
-                    },
+                    }),
                     save_result_as_entity: None,
                     expect_result: None,
                     expect_error: None,
@@ -260,7 +266,7 @@ mod unified {
     pub struct Operation {
         name: String,
         object: String,
-        arguments: Document,
+        arguments: Option<Document>,
         save_result_as_entity: Option<String>,
         expect_result: Option<serde_yaml::Mapping>,
         expect_error: Option<ExpectError>,
@@ -268,9 +274,10 @@ mod unified {
 
     impl Operation {
         pub(crate) fn from_crud_v2(old_op: crud_v2::Operation, test_number: usize) -> Self {
-            let arguments = match old_op.name.as_str() {
+            let (name, arguments) = match old_op.name.as_str() {
                 "waitForEvent" | "assertEventCount" => {
-                    let event = match old_op.arguments.get_str("event").unwrap() {
+                    let old_arguments = old_op.arguments.unwrap();
+                    let event = match old_arguments.get_str("event").unwrap() {
                         "ServerMarkedUnknownEvent" => doc! {
                             "serverDescriptionChanged": {
                                 "newDescription": { "type": "Unknown" }
@@ -282,18 +289,37 @@ mod unified {
                         e => panic!("unrecognized event: {}", e),
                     };
 
-                    doc! {
-                        "client": client_deref_placeholder(test_number),
-                        "event": event,
-                        "count": old_op.arguments.get("count").unwrap()
-                    }
+                    (
+                        None,
+                        Some(doc! {
+                            "client": client_deref_placeholder(test_number),
+                            "event": event,
+                            "count": old_arguments.unwrap().get("count").unwrap()
+                        }),
+                    )
                 }
-
-                _ => old_op.arguments,
+                "recordPrimary" => {
+                    let arguments = doc! {
+                        "client": client_deref_placeholder(test_number),
+                        "id": "TODO: placeholder topology description definition"
+                    };
+                    ("recordTopologyDescription".to_string().into(), Some(arguments))
+                }
+                "waitForPrimaryChange" => {
+                    let mut arguments = doc! {
+                        "client": client_deref_placeholder(test_number),
+                        "priorTopologyDescription": "TODO: placeholder topology description deref"
+                    };
+                    if let Some(timeout) = old_op.arguments.unwrap().get("timeoutMS") {
+                        arguments.insert("timeoutMS", timeout);
+                    }
+                    (None, Some(arguments))
+                }
+                _ => (None, old_op.arguments),
             };
 
             Self {
-                name: old_op.name,
+                name: name.unwrap_or(old_op.name),
                 object: match old_op.object.as_str() {
                     "collection" => collection_deref_placeholder(test_number),
                     _ => old_op.object,
@@ -423,7 +449,7 @@ fn convert(file_name: impl AsRef<str>, old: crud_v2::TestFile) -> Result<String>
     for (i, old_test) in old.tests.into_iter().enumerate() {
         ents.push(CreateEntity::Client(ClientEntity {
             id: format!("$CLIENT_{}_DEFINITION_PLACEHOLDER$", i),
-            observe_events: Some(vec![ExpectEvent::CommandStartedEvent]),
+            observe_events: Some(vec!["TODO".to_string()]),
             uri_options: old_test.client_uri.clone(),
         }));
 
@@ -491,7 +517,8 @@ fn convert(file_name: impl AsRef<str>, old: crud_v2::TestFile) -> Result<String>
 
 fn main() -> Result<()> {
     // let file = File::open("/home/patrick/specifications/source/server-discovery-and-monitoring/tests/integration/auth-error.yml")?;
-    let file = File::open("/home/patrick/specifications/source/server-discovery-and-monitoring/tests/integration/hello-timeout.yml")?;
+    // let file = File::open("/home/patrick/specifications/source/server-discovery-and-monitoring/tests/integration/hello-timeout.yml")?;
+    let file = File::open("/home/patrick/specifications/source/server-discovery-and-monitoring/tests/integration/rediscover-quickly-after-step-down.yml")?;
 
     let old: crud_v2::TestFile = serde_yaml::from_reader(file)?;
     let new = convert("auth-error", old)?;
