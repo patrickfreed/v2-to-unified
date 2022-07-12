@@ -81,19 +81,6 @@ mod crud_v2 {
             if self.expectations.is_some() {
                 observe_events.insert("commandStartedEvent");
             }
-
-            for op in self.operations.iter() {
-                if matches!(op.name.as_str(), "waitForEvent" | "assertEventCount") {
-                    let event_name = op.arguments.as_ref().unwrap().get_str("event").unwrap();
-                    let observe = match event_name {
-                        "PoolClearedEvent" => crate::unified::POOL_CLEARED,
-                        "PoolReadyEvent" => crate::unified::POOL_READY,
-                        "ServerMarkedUnknownEvent" => crate::unified::SERVER_DESCRIPTION_CHANGED,
-                        other => panic!("unexpected event: {}", other),
-                    };
-                    observe_events.insert(observe);
-                }
-            }
             observe_events
         }
     }
@@ -367,6 +354,7 @@ mod unified {
             let mut arguments = old_op.arguments;
             let mut object = match old_op.object.as_str() {
                 "collection" => COLLECTION_DEREF_PLACEHOLDER.to_string(),
+                "database" => DATABASE_DEREF_PLACEHOLDER.to_string(),
                 _ => old_op.object,
             };
 
@@ -677,7 +665,7 @@ fn convert(file_name: impl AsRef<str>, old: crud_v2::TestFile) -> Result<String>
 
     let test_file = unified::TestFile {
         description: file_name.as_ref().to_string(),
-        schema_version: "1.9".to_string(),
+        schema_version: "1.10".to_string(),
         run_on_requirements: old
             .run_on
             .map(|run_on| run_on.into_iter().map(From::from).collect()),
